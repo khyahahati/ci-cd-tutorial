@@ -1,0 +1,24 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nodejs-app
+  labels:
+    app: nodejs-app
+spec:
+  replicas: 3 
+  selector:
+    matchLabels:
+      app: nodejs-app
+  template:
+    metadata:
+      labels:
+        app: nodejs-app
+    spec:
+      containers:
+      - name: nodejs-container
+        image: ${{vars.IMAGE}}:latest 
+        ports:
+        - containerPort: 5001 
+        env:
+        - name: PORT
+          value: "5001"
