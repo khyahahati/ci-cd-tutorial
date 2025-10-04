@@ -1,4 +1,5 @@
 name: CD Pipeline to Minikube (staging and production)
+
 on:
   push:
     branches:
@@ -10,7 +11,8 @@ on:
 
 env:
   PORT: 5001
-  IMAGE: nodejs-app:${{github.sha}}
+  IMAGE: nodejs-app:${{ github.sha }}
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -46,11 +48,11 @@ jobs:
       - name: Build Docker image in Minikube
         run: |
           eval $(minikube docker-env)
-          docker build -t ${{env.IMAGE}} .
+          docker build -t ${{ env.IMAGE }} .
           
       - name: Update Kubernetes manifests with image tag
         run: |
-          sed -i "s|image: .*|image: ${{env.IMAGE}}|g" k8s/deployment.yaml
+          sed -i "s|image: .*|image: ${{ env.IMAGE }}|g" k8s/deployment.yaml
           
       - name: Deploy to Minikube - Production environment (on main branch or release)
         if: github.ref == 'refs/heads/main' || (github.event_name == 'release' && github.event.action == 'published')
@@ -58,10 +60,18 @@ jobs:
           echo "Deploying to production environment"
           kubectl apply -f k8s/deployment.yaml
           kubectl apply -f k8s/service.yaml
-          kubectl set image deployment/nodejs-app nodejs-container=${{env.IMAGE}} --record
+          kubectl set image deployment/nodejs-app nodejs-container=${{ env.IMAGE }} --record
           kubectl rollout status deployment/nodejs-app
           kubectl get services
-          
+
+      - name: Verify deployment in production
+        if: github.ref == 'refs/heads/main' || (github.event_name == 'release' && github.event.action == 'published')
+        run: |
+          echo "Smoke testing production deployment..."
+          kubectl port-forward svc/nodejs-service 8080:80 &
+          sleep 5
+          curl -v http://localhost:8080
+
       - name: Deploy to Minikube - Staging environment
         if: github.ref == 'refs/heads/staging'
         run: |
@@ -71,6 +81,14 @@ jobs:
           # Apply manifests to staging namespace
           kubectl apply -f k8s/deployment.yaml -n staging
           kubectl apply -f k8s/service.yaml -n staging
-          kubectl set image deployment/nodejs-app nodejs-container=${{env.IMAGE}} --record -n staging
+          kubectl set image deployment/nodejs-app nodejs-container=${{ env.IMAGE }} --record -n staging
           kubectl rollout status deployment/nodejs-app -n staging
           kubectl get services -n staging
+
+      - name: Verify deployment in staging
+        if: github.ref == 'refs/heads/staging'
+        run: |
+          echo "Smoke testing staging deployment..."
+          kubectl port-forward svc/nodejs-service 8080:80 -n staging &
+          sleep 5
+          curl -v http://localhost:8080
