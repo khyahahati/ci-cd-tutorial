@@ -1,15 +1,16 @@
-name: CD Pipeline to Google Cloud Run (staging and production)
+name: CD Pipeline to Minikube (staging and production)
 on:
   push:
     branches:
       - staging
+      - main
   workflow_dispatch: {}
   release:
     types: published
 
 env:
   PORT: 5001
-  IMAGE: ${{vars.IMAGE}}:${{github.sha}}
+  IMAGE: nodejs-app:${{github.sha}}
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -23,56 +24,53 @@ jobs:
 
       - name: Test application
         run: npm test
-  build:
+        
+  build-and-deploy:
     needs: test
     runs-on: ubuntu-latest
-    name: Setup project, Authorize GitHub Actions to GCP and Docker Hub, and deploy
+    name: Build Docker image and deploy to Minikube
     steps:
       - name: Checkout
         uses: actions/checkout@v3
 
-      - name: Authenticate for GCP
-        id: gcp-auth
-        uses: google-github-actions/auth@v0
+      - name: Start Minikube
+        uses: medyagh/setup-minikube@master
         with:
-          credentials_json: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+          minikube-version: 1.31.2
+          kubernetes-version: 1.28.3
 
-      - name: Set up Cloud SDK
-        uses: google-github-actions/setup-gcloud@v0
-
-      - name: Authenticate for Docker Hub
-        id: docker-auth
-        env:
-          D_USER: ${{secrets.DOCKER_USER}}
-          D_PASS: ${{secrets.DOCKER_PASSWORD}}
+      - name: Configure Docker to use Minikube's Docker daemon
         run: |
-          docker login -u $D_USER -p $D_PASS
-      - name: Build and tag Image
+          eval $(minikube docker-env)
+          
+      - name: Build Docker image in Minikube
         run: |
+          eval $(minikube docker-env)
           docker build -t ${{env.IMAGE}} .
-      - name: Push the image to Docker hub
+          
+      - name: Update Kubernetes manifests with image tag
         run: |
-          docker push ${{env.IMAGE}}
-      - name: Enable the Billing API
+          sed -i "s|image: .*|image: ${{env.IMAGE}}|g" k8s/deployment.yaml
+          
+      - name: Deploy to Minikube - Production environment (on main branch or release)
+        if: github.ref == 'refs/heads/main' || (github.event_name == 'release' && github.event.action == 'published')
         run: |
-          gcloud services enable cloudbilling.googleapis.com --project=${{secrets.GCP_PROJECT_ID}}
-      - name: Deploy to GCP Run - Production environment (If a new release was published from the master branch)
-        if: github.event_name == 'release' && github.event.action == 'published' && github.event.release.target_commitish == 'main'
-        run: |
-          gcloud run deploy ${{vars.GCR_PROJECT_NAME}} \
-          --region ${{vars.GCR_REGION}} \
-          --image ${{env.IMAGE}} \
-          --platform "managed" \
-          --allow-unauthenticated \
-          --tag production \
-      - name: Deploy to GCP Run - Staging environment
-        if: github.ref != 'refs/heads/main'
+          echo "Deploying to production environment"
+          kubectl apply -f k8s/deployment.yaml
+          kubectl apply -f k8s/service.yaml
+          kubectl set image deployment/nodejs-app nodejs-container=${{env.IMAGE}} --record
+          kubectl rollout status deployment/nodejs-app
+          kubectl get services
+          
+      - name: Deploy to Minikube - Staging environment
+        if: github.ref == 'refs/heads/staging'
         run: |
           echo "Deploying to staging environment"
-          # Deploy service with to staging environment
-          gcloud run deploy ${{vars.GCR_STAGING_PROJECT_NAME}} \
-          --region ${{vars.GCR_REGION}} \
-          --image ${{env.IMAGE}} \
-          --platform "managed" \
-          --allow-unauthenticated \
-          --tag staging \
+          # Create staging namespace if it doesn't exist
+          kubectl create namespace staging --dry-run=client -o yaml | kubectl apply -f -
+          # Apply manifests to staging namespace
+          kubectl apply -f k8s/deployment.yaml -n staging
+          kubectl apply -f k8s/service.yaml -n staging
+          kubectl set image deployment/nodejs-app nodejs-container=${{env.IMAGE}} --record -n staging
+          kubectl rollout status deployment/nodejs-app -n staging
+          kubectl get services -n staging
